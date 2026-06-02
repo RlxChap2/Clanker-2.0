@@ -21,8 +21,15 @@ const A = {
   bgBlue: '\x1b[44m', bgCyan: '\x1b[46m', bgGray: '\x1b[100m',
 };
 
-const cl    = (a, t) => `${a}${t}${A.reset}`;
-const strip = s => String(s).replace(/\x1b\[[0-9;]*m/g, '');
+function asciiText(value) {
+  return String(value ?? '')
+    .replace(/\x1b\[[0-9;]*m/g, '')
+    .replace(/[^\x09\x0a\x0d\x20-\x7e]/g, '')
+    .replace(/[ \t]+/g, ' ');
+}
+
+const cl    = (a, t) => `${a}${asciiText(t)}${A.reset}`;
+const strip = s => asciiText(String(s).replace(/\x1b\[[0-9;]*m/g, ''));
 const W     = () => { try { return Math.min(process.stdout.columns || 90, 130); } catch { return 90; } };
 const clear = () => process.stdout.write('\x1bc');
 
@@ -1208,6 +1215,90 @@ function printBanner() {
 // ═══════════════════════════════════════════════
 //   MAIN MENU
 // ═══════════════════════════════════════════════
+// ASCII-safe presentation overrides for terminals that do not render Unicode well.
+function fileIcon(name, isDir) {
+  const ext = path.extname(name).toLowerCase();
+  if (isDir) return { icon: '[DIR]', color: DIR_COLORS[name] || A.bBlue };
+  const known = FILE_ICONS[ext];
+  return { icon: ext ? '[FILE]' : '[TXT]', color: known?.color || A.white };
+}
+
+function box(title, lines, accent = A.bCyan, width = 60) {
+  const iW = width - 2;
+  const cleanTitle = strip(title).trim();
+  const top = '+' + '-'.repeat(iW) + '+';
+  const mid = '+' + '-'.repeat(iW) + '+';
+  const bot = '+' + '-'.repeat(iW) + '+';
+  const tPad = Math.max(0, Math.floor((iW - cleanTitle.length) / 2));
+  const titleRow = '|' + ' '.repeat(tPad) + cleanTitle + ' '.repeat(Math.max(0, iW - tPad - cleanTitle.length)) + '|';
+
+  console.log(cl(accent, top));
+  console.log(cl(accent, titleRow));
+  console.log(cl(accent, mid));
+  lines.forEach((ln) => {
+    const text = strip(ln);
+    const pad = Math.max(0, iW - 2 - text.length);
+    console.log(cl(accent, '|') + ' ' + text + ' '.repeat(pad) + ' ' + cl(accent, '|'));
+  });
+  console.log(cl(accent, bot));
+}
+
+function divider(label = '', accent = A.bCyan) {
+  const w = W();
+  const txt = label ? ` ${strip(label).trim()} ` : '';
+  const side = Math.max(0, Math.floor((w - txt.length) / 2));
+  console.log(cl(accent, '-'.repeat(side)) + cl(A.bold + A.bWhite, txt) + cl(accent, '-'.repeat(Math.max(0, w - side - txt.length))));
+}
+
+function header(title, subtitle = '') {
+  const w = W();
+  console.log('\n' + cl(A.bCyan, '='.repeat(w)));
+  const t = ` ${strip(title).trim()} `;
+  const tPad = Math.max(0, Math.floor((w - t.length) / 2));
+  console.log(' '.repeat(tPad) + cl(A.bold + A.bCyan, t));
+  if (subtitle) {
+    const cleanSubtitle = strip(subtitle).trim();
+    const sPad = Math.max(0, Math.floor((w - cleanSubtitle.length) / 2));
+    console.log(' '.repeat(sPad) + cl(A.gray, cleanSubtitle));
+  }
+  console.log(cl(A.bCyan, '='.repeat(w)) + '\n');
+}
+
+function spinner(text) {
+  const frames = ['-', '\\', '|', '/'];
+  let i = 0;
+  const iv = setInterval(() => {
+    process.stdout.write(`\r  ${cl(A.bCyan, frames[i++ % frames.length])} ${cl(A.gray, text)}   `);
+  }, 80);
+  return {
+    succeed: (m) => {
+      clearInterval(iv);
+      process.stdout.write(`\r  ${cl(A.bGreen, 'OK')} ${cl(A.bWhite, m)}\n`);
+    },
+    fail: (m) => {
+      clearInterval(iv);
+      process.stdout.write(`\r  ${cl(A.bRed, 'ERR')} ${cl(A.bRed, m)}\n`);
+    },
+    update: (m) => {
+      process.stdout.write(`\r  ${cl(A.bCyan, frames[i % frames.length])} ${cl(A.gray, m)}   `);
+    },
+    stop: () => {
+      clearInterval(iv);
+      process.stdout.write('\r' + ' '.repeat(60) + '\r');
+    },
+  };
+}
+
+function printBanner() {
+  const w = W();
+  console.log(cl(A.bCyan, '='.repeat(w)));
+  const title = 'CLANKER 2.0 EXPLORER';
+  const subtitle = 'Project Browser | Files | Search | Git';
+  console.log(' '.repeat(Math.max(0, Math.floor((w - title.length) / 2))) + cl(A.bold + A.bCyan, title));
+  console.log(' '.repeat(Math.max(0, Math.floor((w - subtitle.length) / 2))) + cl(A.gray, subtitle));
+  console.log(cl(A.bCyan, '='.repeat(w)));
+}
+
 async function main() {
   // Resolve project path (arg or cwd)
   let projectPath = process.argv[2] ? path.resolve(process.argv[2]) : process.cwd();

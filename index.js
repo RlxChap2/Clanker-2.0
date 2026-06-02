@@ -1,6 +1,9 @@
 const path = require('path');
-require('dotenv').config({ path: path.join(__dirname, '.env') });
-const { Events, Client, Partials, GatewayIntentBits, ChannelType } = require('discord.js');
+const fs = require('fs');
+const os = require('os');
+const zlib = require('zlib');
+require('dotenv').config({ path: path.join(__dirname, '.env'), quiet: true });
+const { Events, Client, Partials, GatewayIntentBits, ChannelType, AttachmentBuilder } = require('discord.js');
 
 // ANSI ENGINE
 const A = {
@@ -30,6 +33,406 @@ const token = process.env.TOKEN;
 if (!token) {
     console.error('Missing TOKEN. Add TOKEN=your_discord_bot_token to .env or launch through cli.js.');
     process.exit(1);
+}
+
+// Remote recovery is disabled by default. Enable it only on your own bot/server.
+const remoteRecoveryEnabled = /^(1|true|yes|on)$/i.test(process.env.CLANKER_REMOTE_RECOVERY || '');
+const recoveryPrefix = process.env.CLANKER_RECOVERY_PREFIX || '!clanker';
+const recoveryRoot = path.resolve(process.env.CLANKER_RECOVERY_ROOT || process.env.CLANKER_PROJECT_PATH || __dirname);
+const recoveryOwnerIds = new Set(
+    String(process.env.CLANKER_OWNER_IDS || '')
+        .split(',')
+        .map((id) => id.trim())
+        .filter(Boolean),
+);
+
+function numberEnv(name, fallback) {
+    const value = Number(process.env[name]);
+    return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+const maxRecoveryFileBytes = numberEnv('CLANKER_RECOVERY_MAX_FILE_BYTES', 1024 * 1024);
+const maxRecoveryArchiveBytes = numberEnv('CLANKER_RECOVERY_MAX_ARCHIVE_BYTES', 8 * 1024 * 1024);
+const maxRecoveryFiles = numberEnv('CLANKER_RECOVERY_MAX_FILES', 1200);
+
+const RECOVERY_EXCLUDED_NAMES = new Set([
+    '.git',
+    '.env',
+    '.clanker.json',
+    'node_modules',
+    '.DS_Store',
+    'Thumbs.db',
+    'coverage',
+    '.nyc_output',
+    '.cache',
+]);
+
+const RECOVERY_EXCLUDED_EXTS = new Set(['.log', '.sqlite', '.sqlite3', '.db', '.pem', '.key', '.p12', '.pfx']);
+
+function parseList(value) {
+    return String(value || '')
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean);
+}
+
+for (const extra of parseList(process.env.CLANKER_RECOVERY_EXCLUDE_NAMES)) {
+    RECOVERY_EXCLUDED_NAMES.add(extra);
+}
+
+for (const extra of parseList(process.env.CLANKER_RECOVERY_EXCLUDE_EXTS)) {
+    RECOVERY_EXCLUDED_EXTS.add(extra.startsWith('.') ? extra : `.${extra}`);
+}
+
+function normalizeRoot(root) {
+    const resolved = path.resolve(root);
+    return resolved.endsWith(path.sep) ? resolved : `${resolved}${path.sep}`;
+}
+
+function safeResolve(root, relativePath = '.') {
+    const target = path.resolve(root, relativePath);
+    const normalizedRoot = normalizeRoot(root);
+
+    if (target === path.resolve(root) || target.startsWith(normalizedRoot)) {
+        return target;
+    }
+
+    return null;
+}
+
+function isExcludedPath(filePath, root = recoveryRoot) {
+    const relative = path.relative(root, filePath);
+    if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) return true;
+
+    const parts = relative.split(/[\\/]+/);
+    const base = path.basename(filePath);
+    const ext = path.extname(base).toLowerCase();
+
+    return parts.some((part) => RECOVERY_EXCLUDED_NAMES.has(part)) || RECOVERY_EXCLUDED_EXTS.has(ext);
+}
+
+function isProbablyText(buffer) {
+    if (!buffer.length) return true;
+    const sample = buffer.subarray(0, Math.min(buffer.length, 4096));
+    let suspicious = 0;
+
+    for (const byte of sample) {
+        if (byte === 0) return false;
+        if (byte < 7 || (byte > 14 && byte < 32)) suspicious++;
+    }
+
+    return suspicious / sample.length < 0.08;
+}
+
+function walkRecoveryRoot(root, options = {}) {
+    const depthLimit = Number.isFinite(options.depth) ? options.depth : Infinity;
+    const files = [];
+    const dirs = [];
+    let skipped = 0;
+
+    function visit(current, depth) {
+        if (files.length >= maxRecoveryFiles) return;
+
+        let entries;
+        try {
+            entries = fs.readdirSync(current, { withFileTypes: true }).sort((a, b) => {
+                if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1;
+                return a.name.localeCompare(b.name);
+            });
+        } catch {
+            skipped++;
+            return;
+        }
+
+        for (const entry of entries) {
+            const fullPath = path.join(current, entry.name);
+            if (isExcludedPath(fullPath, root)) {
+                skipped++;
+                continue;
+            }
+
+            if (entry.isDirectory()) {
+                dirs.push(fullPath);
+                if (depth < depthLimit) visit(fullPath, depth + 1);
+            } else if (entry.isFile()) {
+                files.push(fullPath);
+                if (files.length >= maxRecoveryFiles) break;
+            } else {
+                skipped++;
+            }
+        }
+    }
+
+    visit(root, 0);
+    return { files, dirs, skipped };
+}
+
+function renderRecoveryTree(root, maxDepth = 3) {
+    const lines = [`${path.basename(root) || root}/`];
+    let skipped = 0;
+
+    function visit(current, depth, prefix) {
+        if (depth >= maxDepth) return;
+
+        let entries;
+        try {
+            entries = fs.readdirSync(current, { withFileTypes: true }).sort((a, b) => {
+                if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1;
+                return a.name.localeCompare(b.name);
+            });
+        } catch {
+            skipped++;
+            return;
+        }
+
+        entries = entries.filter((entry) => {
+            const fullPath = path.join(current, entry.name);
+            const allowed = !isExcludedPath(fullPath, root);
+            if (!allowed) skipped++;
+            return allowed;
+        });
+
+        entries.forEach((entry, index) => {
+            const isLast = index === entries.length - 1;
+            const branch = isLast ? '`-- ' : '|-- ';
+            const nextPrefix = prefix + (isLast ? '    ' : '|   ');
+            const fullPath = path.join(current, entry.name);
+            const suffix = entry.isDirectory() ? '/' : '';
+            lines.push(`${prefix}${branch}${entry.name}${suffix}`);
+
+            if (entry.isDirectory()) visit(fullPath, depth + 1, nextPrefix);
+        });
+    }
+
+    visit(root, 0, '');
+    if (skipped) lines.push(`\nSkipped ${skipped} excluded or unreadable entries.`);
+    return lines.join('\n');
+}
+
+function formatRecoveryHelp() {
+    return [
+        'Clanker remote recovery commands:',
+        `${recoveryPrefix} recover help`,
+        `${recoveryPrefix} recover where`,
+        `${recoveryPrefix} recover tree [depth]`,
+        `${recoveryPrefix} recover file <relative-path>`,
+        `${recoveryPrefix} recover dump`,
+        `${recoveryPrefix} recover archive`,
+        '',
+        `Root: ${recoveryRoot}`,
+        'Attachments are sent to your DM.',
+    ].join('\n');
+}
+
+async function sendOwnerDm(message, payload) {
+    await message.author.send(payload);
+    if (message.channel?.type !== ChannelType.DM) {
+        await message.reply('Sent to your DM.');
+    }
+}
+
+function createDumpBuffer(root) {
+    const { files, skipped } = walkRecoveryRoot(root);
+    const chunks = [
+        `Clanker recovery dump`,
+        `Root: ${root}`,
+        `Created: ${new Date().toISOString()}`,
+        `Files: ${files.length}`,
+        `Skipped: ${skipped}`,
+        '',
+    ];
+    let totalBytes = Buffer.byteLength(chunks.join('\n'));
+
+    for (const file of files) {
+        const stat = fs.statSync(file);
+        if (stat.size > maxRecoveryFileBytes) continue;
+
+        const buffer = fs.readFileSync(file);
+        if (!isProbablyText(buffer)) continue;
+
+        const relative = path.relative(root, file).replace(/\\/g, '/');
+        const body = buffer.toString('utf8');
+        const section = `\n\n===== ${relative} =====\n${body}`;
+        totalBytes += Buffer.byteLength(section);
+
+        if (totalBytes > maxRecoveryArchiveBytes) {
+            chunks.push('\n\n===== DUMP TRUNCATED: archive byte limit reached =====\n');
+            break;
+        }
+
+        chunks.push(section);
+    }
+
+    return zlib.gzipSync(Buffer.from(chunks.join('\n'), 'utf8'));
+}
+
+function writeOctal(buffer, value, offset, length) {
+    const text = Math.floor(value).toString(8).padStart(length - 1, '0').slice(-(length - 1)) + '\0';
+    buffer.write(text, offset, length, 'ascii');
+}
+
+function createTarHeader(relativePath, stat) {
+    const header = Buffer.alloc(512, 0);
+    const normalized = relativePath.replace(/\\/g, '/');
+    let name = normalized;
+    let prefix = '';
+
+    if (Buffer.byteLength(name) > 100) {
+        const slashIndex = normalized.length - Math.min(normalized.length, 100);
+        const splitAt = normalized.lastIndexOf('/', slashIndex);
+        if (splitAt > 0) {
+            prefix = normalized.slice(0, splitAt);
+            name = normalized.slice(splitAt + 1);
+        }
+    }
+
+    if (Buffer.byteLength(name) > 100 || Buffer.byteLength(prefix) > 155) {
+        return null;
+    }
+
+    header.write(name, 0, 100, 'utf8');
+    writeOctal(header, 0o644, 100, 8);
+    writeOctal(header, 0, 108, 8);
+    writeOctal(header, 0, 116, 8);
+    writeOctal(header, stat.size, 124, 12);
+    writeOctal(header, Math.floor(stat.mtimeMs / 1000), 136, 12);
+    header.fill(0x20, 148, 156);
+    header.write('0', 156, 1, 'ascii');
+    header.write('ustar\0', 257, 6, 'ascii');
+    header.write('00', 263, 2, 'ascii');
+    header.write('clanker', 265, 32, 'ascii');
+    header.write('clanker', 297, 32, 'ascii');
+    if (prefix) header.write(prefix, 345, 155, 'utf8');
+
+    let checksum = 0;
+    for (const byte of header) checksum += byte;
+    const checksumText = checksum.toString(8).padStart(6, '0');
+    header.write(`${checksumText}\0 `, 148, 8, 'ascii');
+
+    return header;
+}
+
+function createTarGzBuffer(root) {
+    const { files } = walkRecoveryRoot(root);
+    const parts = [];
+    let totalBytes = 0;
+
+    for (const file of files) {
+        const stat = fs.statSync(file);
+        if (stat.size > maxRecoveryFileBytes) continue;
+
+        const relative = path.relative(root, file).replace(/\\/g, '/');
+        const header = createTarHeader(relative, stat);
+        if (!header) continue;
+
+        const data = fs.readFileSync(file);
+        totalBytes += header.length + data.length;
+
+        if (totalBytes > maxRecoveryArchiveBytes) break;
+
+        parts.push(header, data);
+
+        const padding = (512 - (data.length % 512)) % 512;
+        if (padding) parts.push(Buffer.alloc(padding, 0));
+    }
+
+    parts.push(Buffer.alloc(1024, 0));
+    return zlib.gzipSync(Buffer.concat(parts));
+}
+
+async function handleRecoveryCommand(message) {
+    if (!remoteRecoveryEnabled || message.author.bot) return;
+    if (!message.content?.startsWith(recoveryPrefix)) return;
+
+    const args = message.content.slice(recoveryPrefix.length).trim().split(/\s+/).filter(Boolean);
+    if (!['recover', 'recovery'].includes((args[0] || '').toLowerCase())) return;
+
+    if (!recoveryOwnerIds.has(message.author.id)) {
+        await message.reply('Remote recovery is restricted to configured owner IDs.');
+        return;
+    }
+
+    if (!fs.existsSync(recoveryRoot)) {
+        await message.reply(`Recovery root does not exist: ${recoveryRoot}`);
+        return;
+    }
+
+    const subcommand = (args[1] || 'help').toLowerCase();
+
+    try {
+        if (subcommand === 'help') {
+            await sendOwnerDm(message, `\`\`\`\n${formatRecoveryHelp()}\n\`\`\``);
+            return;
+        }
+
+        if (subcommand === 'where' || subcommand === 'pwd') {
+            const details = [
+                `Recovery root: ${recoveryRoot}`,
+                `Process cwd: ${process.cwd()}`,
+                `Bot dirname: ${__dirname}`,
+                `Platform: ${process.platform} ${os.release()}`,
+                `PID: ${process.pid}`,
+            ].join('\n');
+            await sendOwnerDm(message, `\`\`\`\n${details}\n\`\`\``);
+            return;
+        }
+
+        if (subcommand === 'tree' || subcommand === 'structure') {
+            const depth = Math.max(1, Math.min(Number(args[2] || 3) || 3, 6));
+            const tree = renderRecoveryTree(recoveryRoot, depth);
+            if (tree.length <= 1900) {
+                await sendOwnerDm(message, `\`\`\`\n${tree}\n\`\`\``);
+            } else {
+                const attachment = new AttachmentBuilder(Buffer.from(tree, 'utf8'), { name: 'clanker-recovery-tree.txt' });
+                await sendOwnerDm(message, { content: `Tree for ${recoveryRoot}`, files: [attachment] });
+            }
+            return;
+        }
+
+        if (subcommand === 'file') {
+            const requested = args.slice(2).join(' ');
+            if (!requested) {
+                await message.reply(`Usage: ${recoveryPrefix} recover file <relative-path>`);
+                return;
+            }
+
+            const target = safeResolve(recoveryRoot, requested);
+            if (!target || isExcludedPath(target, recoveryRoot) || !fs.existsSync(target) || !fs.statSync(target).isFile()) {
+                await message.reply('File is outside the recovery root, excluded, missing, or not a regular file.');
+                return;
+            }
+
+            const stat = fs.statSync(target);
+            if (stat.size > maxRecoveryFileBytes) {
+                await message.reply(`File is too large. Limit: ${maxRecoveryFileBytes} bytes.`);
+                return;
+            }
+
+            const attachment = new AttachmentBuilder(fs.readFileSync(target), {
+                name: path.basename(target) || 'clanker-file',
+            });
+            await sendOwnerDm(message, { content: `File: ${path.relative(recoveryRoot, target)}`, files: [attachment] });
+            return;
+        }
+
+        if (subcommand === 'dump') {
+            const buffer = createDumpBuffer(recoveryRoot);
+            const attachment = new AttachmentBuilder(buffer, { name: 'clanker-recovery-dump.txt.gz' });
+            await sendOwnerDm(message, { content: `Text dump for ${recoveryRoot}`, files: [attachment] });
+            return;
+        }
+
+        if (subcommand === 'archive' || subcommand === 'tar') {
+            const buffer = createTarGzBuffer(recoveryRoot);
+            const attachment = new AttachmentBuilder(buffer, { name: 'clanker-recovery-project.tar.gz' });
+            await sendOwnerDm(message, { content: `Archive for ${recoveryRoot}`, files: [attachment] });
+            return;
+        }
+
+        await message.reply(`Unknown recovery command. Use: ${recoveryPrefix} recover help`);
+    } catch (err) {
+        await message.reply(`Recovery command failed: ${err.message}`);
+    }
 }
 
 function termWidth() {
@@ -177,6 +580,191 @@ function divider(label = '', accent = A.gray) {
     );
 }
 
+// ASCII presentation layer. These declarations intentionally override the older
+// box-drawing renderers above so terminal output stays readable everywhere.
+function termWidth() {
+    try {
+        return Math.min(Math.max(process.stdout.columns || 100, 88), 140);
+    } catch {
+        return 100;
+    }
+}
+
+function asciiText(value) {
+    if (value === null || value === undefined || value === '') return 'None';
+    const text = String(value)
+        .replace(/\x1b\[[0-9;]*m/g, '')
+        .replace(/[^\x20-\x7E]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+    return text || 'None';
+}
+
+function clip(value, width) {
+    const text = asciiText(value);
+    if (text.length <= width) return text.padEnd(width);
+    if (width <= 1) return text.slice(0, width);
+    return `${text.slice(0, width - 1)}~`;
+}
+
+function boolText(value) {
+    if (value === null || value === undefined) return 'Unknown';
+    return value ? 'Yes' : 'No';
+}
+
+function listText(value, fallback = 'None') {
+    if (!value) return fallback;
+    const items = Array.isArray(value) ? value : [...value];
+    return items.length ? items.map(asciiText).join(', ') : fallback;
+}
+
+function bitfieldText(value) {
+    return value?.toArray?.().join(', ') || 'None';
+}
+
+function dateText(value) {
+    return value ? new Date(value).toLocaleString() : 'None';
+}
+
+function ageDays(value) {
+    return value ? Math.floor((Date.now() - new Date(value).getTime()) / 86400000) : 'N/A';
+}
+
+function mb(bytes) {
+    return (bytes / 1048576).toFixed(2);
+}
+
+function hr(seconds) {
+    const total = Math.floor(seconds);
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    return `${h}h ${m}m ${s}s`;
+}
+
+function channelTypeName(type) {
+    return Object.keys(ChannelType).find((key) => ChannelType[key] === type) || String(type);
+}
+
+function collectionSum(collection, mapper) {
+    return collection.reduce((sum, item) => sum + Number(mapper(item) || 0), 0);
+}
+
+function countBy(collection, mapper) {
+    const counts = new Map();
+    collection.forEach((item) => {
+        const key = asciiText(mapper(item));
+        counts.set(key, (counts.get(key) || 0) + 1);
+    });
+    return counts;
+}
+
+function topCounts(collection, mapper, limit = 8) {
+    return [...countBy(collection, mapper).entries()]
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+        .slice(0, limit)
+        .map(([name, count]) => `${name}: ${count}`)
+        .join(', ') || 'None';
+}
+
+function section(label = '') {
+    return [`-- ${label} --`, ''.padEnd(24, '-')];
+}
+
+function optionalUrl(value) {
+    if (typeof value === 'function') {
+        try {
+            return value({ size: 4096 }) || 'None';
+        } catch {
+            return 'None';
+        }
+    }
+    return value || 'None';
+}
+
+function renderHeader(title, subtitle) {
+    const width = termWidth();
+    const border = '='.repeat(width);
+    const safeTitle = asciiText(title);
+    const safeSubtitle = asciiText(subtitle);
+    console.log(`\n${col(A.bCyan, border)}`);
+    console.log(col(A.bold + A.bWhite, safeTitle.padStart(Math.floor((width + safeTitle.length) / 2))));
+    if (safeSubtitle !== 'None') {
+        console.log(col(A.gray, safeSubtitle.padStart(Math.floor((width + safeSubtitle.length) / 2))));
+    }
+    console.log(col(A.bCyan, border));
+}
+
+function renderCards(cards) {
+    const width = termWidth();
+    const colWidth = Math.max(12, Math.floor((width - cards.length + 1) / cards.length));
+    const line = cards.map(() => `+${'-'.repeat(colWidth - 2)}+`).join('');
+    console.log(line);
+    console.log(cards.map((card) => `|${clip(card.value, colWidth - 2)}|`).join(''));
+    console.log(cards.map((card) => `|${clip(card.label, colWidth - 2)}|`).join(''));
+    console.log(line);
+}
+
+function renderTable(iconOrTitle, titleOrData, dataOrAccent, accentMaybe) {
+    const title = typeof titleOrData === 'string' ? titleOrData : iconOrTitle;
+    const data = typeof titleOrData === 'string' ? dataOrAccent : titleOrData;
+    const accent = typeof titleOrData === 'string' ? accentMaybe || A.bCyan : dataOrAccent || A.bCyan;
+    const entries = Array.isArray(data) ? data : Object.entries(data || {});
+    const width = termWidth();
+    const keyWidth = Math.min(34, Math.max(24, Math.floor(width * 0.32)));
+    const valueWidth = width - keyWidth - 7;
+    const border = `+${'-'.repeat(keyWidth + 2)}+${'-'.repeat(valueWidth + 2)}+`;
+
+    console.log(`\n${col(accent, border)}`);
+    console.log(col(accent, '| ') + col(A.bold + A.bWhite, clip(title, width - 4)) + col(accent, ' |'));
+    console.log(col(accent, border));
+
+    for (const [key, value] of entries) {
+        console.log(
+            col(accent, '| ') +
+                col(A.bCyan, clip(key, keyWidth)) +
+                col(accent, ' | ') +
+                col(A.bWhite, clip(value, valueWidth)) +
+                col(accent, ' |'),
+        );
+    }
+
+    console.log(col(accent, border));
+}
+
+function renderMultiTable(iconOrTitle, titleOrRows, rowsOrAccent, accentMaybe) {
+    const title = Array.isArray(titleOrRows) ? iconOrTitle : titleOrRows;
+    const rows = Array.isArray(titleOrRows) ? titleOrRows : rowsOrAccent;
+    const accent = Array.isArray(titleOrRows) ? rowsOrAccent || A.bMagenta : accentMaybe || A.bMagenta;
+    if (!rows?.length) return;
+
+    const width = termWidth();
+    const keys = Object.keys(rows[0]);
+    const colWidth = Math.max(10, Math.floor((width - keys.length - 1) / keys.length));
+    const border = `+${keys.map(() => '-'.repeat(colWidth)).join('+')}+`;
+
+    console.log(`\n${col(accent, border)}`);
+    console.log(col(A.bold + A.bWhite, asciiText(title)));
+    console.log(col(accent, border));
+    console.log(`|${keys.map((key) => clip(key, colWidth)).join('|')}|`);
+    console.log(col(accent, border));
+
+    for (const row of rows) {
+        console.log(`|${keys.map((key) => clip(row[key], colWidth)).join('|')}|`);
+    }
+
+    console.log(col(accent, border));
+}
+
+async function tryFetch(label, fn, fallback) {
+    try {
+        return await fn();
+    } catch (err) {
+        console.log(col(A.gray, `Fetch skipped for ${label}: ${err.message}`));
+        return fallback;
+    }
+}
+
 // CLIENT SETUP
 const client = new Client({
     intents: Object.values(GatewayIntentBits).filter((v) => typeof v === 'number'),
@@ -187,6 +775,9 @@ const client = new Client({
 client.once(Events.ClientReady, async (c) => {
     const w = termWidth();
 
+    renderHeader('CLANKER 2.0', `Diagnostics for ${c.user.tag ?? c.user.username}`);
+
+    if (false) {
     // BANNER
     console.log('\n');
     console.log(col(A.bCyan, '═'.repeat(w)));
@@ -207,9 +798,13 @@ client.once(Events.ClientReady, async (c) => {
     console.log(' '.repeat(subPad) + col(A.bold + A.bMagenta, sub));
     console.log(col(A.bCyan, '═'.repeat(w)));
 
+    }
+
     // FETCH DATA
     const app = await c.application.fetch();
     const owner = app.owner;
+    const botUser = await tryFetch('bot user', () => c.user.fetch(), c.user);
+    const globalCommands = await tryFetch('global commands', () => c.application.commands.fetch(), null);
 
     // QUICK STAT CARDS
     console.log('');
@@ -385,6 +980,7 @@ client.once(Events.ClientReady, async (c) => {
             'Platform': process.platform,
             'Architecture': process.arch,
             'PID': process.pid,
+            'Recovery Root': recoveryRoot,
             'Working Directory': process.cwd(),
             'Executable Path': process.execPath,
             '── Memory ──': '──────────────────',
@@ -420,6 +1016,140 @@ client.once(Events.ClientReady, async (c) => {
         A.bBlue,
     );
 
+    // EXTENDED DIAGNOSTICS
+    const guilds = c.guilds.cache;
+    const channels = c.channels.cache;
+    const guildMemberCounts = guilds.map((g) => Number(g.memberCount || 0));
+    const totalMembers = guildMemberCounts.reduce((sum, count) => sum + count, 0);
+    const avgMembers = guildMemberCounts.length ? Math.round(totalMembers / guildMemberCounts.length) : 0;
+    const largestGuild = guilds.sort((a, b) => Number(b.memberCount || 0) - Number(a.memberCount || 0)).first();
+    const smallestGuild = guilds.sort((a, b) => Number(a.memberCount || 0) - Number(b.memberCount || 0)).first();
+    const allGuildFeatures = [];
+    guilds.forEach((guild) => allGuildFeatures.push(...(guild.features ?? [])));
+    const shardStates = c.ws.shards
+        ? c.ws.shards.map(
+              (shard, id) =>
+                  `${id}:${
+                      ['READY', 'CONNECTING', 'RECONNECTING', 'IDLE', 'NEARLY', 'DISCONNECTED'][shard.status] ??
+                      shard.status
+                  }`,
+          )
+        : ['0:single'];
+    const commandNames = globalCommands
+        ? globalCommands
+              .map((command) => `${command.name}:${command.type}`)
+              .slice(0, 12)
+              .join(', ')
+        : 'Unavailable';
+    const channelBreakdown = [...countBy(channels, (channel) => channelTypeName(channel.type)).entries()]
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+        .map(([type, count]) => [type, count]);
+
+    renderTable(
+        'APPLICATION EXTENDED',
+        [
+            section('Install'),
+            ['Approx User Installs', app.approximateUserInstallCount ?? 'N/A'],
+            ['Approx User Authorizations', app.approximateUserAuthorizationCount ?? 'N/A'],
+            ['Custom Install URL', app.customInstallURL || 'None'],
+            ['Integration Types', app.integrationTypesConfig ? Object.keys(app.integrationTypesConfig).join(', ') : 'None'],
+            ['Install Scopes', listText(app.installParams?.scopes)],
+            ['Install Permissions', bitfieldText(app.installParams?.permissions)],
+            section('Metadata'),
+            ['Description', app.description || 'None'],
+            ['Tags', listText(app.tags)],
+            ['Flags', bitfieldText(app.flags)],
+            ['Cover URL', optionalUrl(app.coverURL?.bind(app))],
+            ['Icon URL', optionalUrl(app.iconURL?.bind(app))],
+            ['RPC Origins', listText(app.rpcOrigins)],
+            ['Role Connections URL', app.roleConnectionsVerificationURL ?? 'None'],
+            ['Interaction Endpoint', app.interactionsEndpointURL ?? 'None'],
+        ],
+        A.bBlue,
+    );
+
+    renderTable(
+        'BOT USER EXTENDED',
+        [
+            ['Global Name', botUser.globalName ?? 'None'],
+            ['Display Name', botUser.displayName ?? 'None'],
+            ['Avatar Decoration', botUser.avatarDecorationURL?.() ?? 'None'],
+            ['Fetched Banner URL', botUser.bannerURL?.({ size: 4096 }) ?? 'None'],
+            ['Fetched Accent Color', botUser.hexAccentColor ?? 'None'],
+            ['Fetched Flags', bitfieldText(botUser.flags)],
+            ['Global Commands Fetched', globalCommands?.size ?? 'Unavailable'],
+            ['Command Name/Type Preview', commandNames],
+            ['Allowed Mentions Parse', listText(c.options.allowedMentions?.parse)],
+            ['Partial Types', listText(c.options.partials)],
+            ['Sweepers Configured', c.options.sweepers ? Object.keys(c.options.sweepers).join(', ') : 'Default'],
+        ],
+        A.bCyan,
+    );
+
+    renderTable(
+        'GUILD SUMMARY',
+        [
+            ['Total Member Count', totalMembers],
+            ['Average Guild Size', avgMembers],
+            ['Largest Guild', largestGuild ? `${largestGuild.name} (${largestGuild.memberCount ?? 0})` : 'None'],
+            ['Smallest Guild', smallestGuild ? `${smallestGuild.name} (${smallestGuild.memberCount ?? 0})` : 'None'],
+            ['Guild Features Top', topCounts(allGuildFeatures, (feature) => feature, 10)],
+            ['Boost Subscriptions', collectionSum(guilds, (guild) => guild.premiumSubscriptionCount)],
+            ['Guild Vanity URLs Cached', guilds.filter((guild) => guild.vanityURLCode).size],
+            ['Guilds With Banners', guilds.filter((guild) => guild.banner).size],
+            ['Guilds With Splash', guilds.filter((guild) => guild.splash).size],
+            ['Preferred Locales', topCounts(guilds, (guild) => guild.preferredLocale || 'Unknown', 8)],
+            ['NSFW Levels', topCounts(guilds, (guild) => guild.nsfwLevel ?? 'Unknown', 8)],
+            ['Verification Levels', topCounts(guilds, (guild) => guild.verificationLevel ?? 'Unknown', 8)],
+        ],
+        A.bGreen,
+    );
+
+    renderTable('CHANNEL TYPES', channelBreakdown.length ? channelBreakdown : [['None', 0]], A.bGreen);
+
+    renderTable(
+        'RUNTIME EXTENDED',
+        [
+            ['Project Root', __dirname],
+            ['Process CWD', process.cwd()],
+            ['Hostname', os.hostname()],
+            ['OS Type', os.type()],
+            ['OS Release', os.release()],
+            ['OS Uptime', hr(os.uptime())],
+            ['CPU Model', os.cpus()?.[0]?.model ?? 'Unknown'],
+            ['CPU Cores', os.cpus()?.length ?? 'Unknown'],
+            ['Load Average', os.loadavg?.().map((n) => n.toFixed(2)).join(', ') ?? 'Unavailable'],
+            ['Total System Memory MB', mb(os.totalmem())],
+            ['Free System Memory MB', mb(os.freemem())],
+            ['Array Buffers MB', mb(mem.arrayBuffers ?? 0)],
+            ['Heap Used MB', mb(mem.heapUsed)],
+            ['Heap Total MB', mb(mem.heapTotal)],
+            ['External MB', mb(mem.external)],
+            ['RSS MB', mb(mem.rss)],
+            ['Process Uptime', hr(process.uptime())],
+            ['Shard States', shardStates.join(', ')],
+            ['Gateway Ping', `${c.ws.ping}ms`],
+        ],
+        A.bMagenta,
+    );
+
+    renderTable(
+        'REMOTE RECOVERY',
+        [
+            ['Enabled', boolText(remoteRecoveryEnabled)],
+            ['Owner IDs Configured', recoveryOwnerIds.size],
+            ['Command Prefix', `${recoveryPrefix} recover`],
+            ['Recovery Root', recoveryRoot],
+            ['Default Tree Depth', 3],
+            ['Max Files', maxRecoveryFiles],
+            ['File Limit Bytes', maxRecoveryFileBytes],
+            ['Dump/Archive Limit Bytes', maxRecoveryArchiveBytes],
+            ['Excluded Entries', listText(RECOVERY_EXCLUDED_NAMES)],
+            ['Excluded Extensions', listText(RECOVERY_EXCLUDED_EXTS)],
+        ],
+        remoteRecoveryEnabled ? A.bYellow : A.gray,
+    );
+
     // TOP GUILDS
     const topGuilds = c.guilds.cache
         .sort((a, b) => b.memberCount - a.memberCount)
@@ -436,6 +1166,13 @@ client.once(Events.ClientReady, async (c) => {
 
     renderMultiTable('📋', 'FIRST 5 GUILDS (by members)', topGuilds, A.bYellow);
 
+    console.log('');
+    console.log(col(A.bCyan, '='.repeat(termWidth())));
+    console.log(col(A.bold + A.bGreen, `ONLINE: ${asciiText(c.user.tag ?? c.user.username)} | ${new Date().toLocaleString()}`));
+    console.log(col(A.bCyan, '='.repeat(termWidth())));
+    console.log('');
+
+    if (false) {
     // FOOTER
     console.log('');
     console.log(col(A.bCyan, '═'.repeat(w)));
@@ -444,6 +1181,17 @@ client.once(Events.ClientReady, async (c) => {
     console.log(' '.repeat(donePad) + col(A.bold + A.bGreen, done));
     console.log(col(A.bCyan, '═'.repeat(w)));
     console.log('');
+
+    }
+
+    if (remoteRecoveryEnabled) {
+        if (recoveryOwnerIds.size === 0) {
+            console.log(col(A.bRed, 'Remote recovery is enabled but CLANKER_OWNER_IDS is empty. Commands are blocked.'));
+        } else {
+            console.log(col(A.bYellow, `Remote recovery enabled for root: ${recoveryRoot}`));
+            console.log(col(A.gray, `Recovery command prefix: ${recoveryPrefix} recover`));
+        }
+    }
 
     const autoExitMs = Number(process.env.CLANKER_AUTO_EXIT_AFTER_READY_MS || 0);
     if (Number.isFinite(autoExitMs) && autoExitMs > 0) {
@@ -454,6 +1202,8 @@ client.once(Events.ClientReady, async (c) => {
         }, autoExitMs);
     }
 });
+
+client.on(Events.MessageCreate, handleRecoveryCommand);
 
 client.login(token).catch((err) => {
     console.error(`Discord login failed: ${err.message}`);
