@@ -46,6 +46,8 @@ const A = {
 
 const c = (color, text) => `${color}${text}${A.reset}`;
 const clearScreen = () => process.stdout.write('\x1bc');
+const stripAnsi = text => String(text).replace(/\x1b\[[0-9;]*m/g, '');
+const APP_ROOT = __dirname;
 
 // ═══════════════════════════════════════════════
 //   TERMINAL WIDTH HELPER
@@ -176,6 +178,17 @@ function spinner(text) {
 // ═══════════════════════════════════════════════
 async function menu(prompt, choices) {
   return new Promise(resolve => {
+    if (!process.stdin.isTTY || !process.stdout.isTTY) {
+      console.log(c(A.bCyan, `\n  ${prompt}`));
+      choices.forEach((ch, i) => {
+        const hint = ch.hint ? ` ${ch.hint}` : '';
+        console.log(`  ${i + 1}. ${stripAnsi(ch.label)}${hint}`);
+      });
+      console.log(c(A.gray, `\n  Non-interactive shell detected; selected: ${stripAnsi(choices[0].label)}\n`));
+      resolve(choices[0].value);
+      return;
+    }
+
     let selected = 0;
 
     const render = () => {
@@ -196,17 +209,25 @@ async function menu(prompt, choices) {
     readline.emitKeypressEvents(process.stdin);
     if (process.stdin.isTTY) process.stdin.setRawMode(true);
 
-    const onKey = (_, key) => {
+    const choose = index => {
+      process.stdin.removeListener('keypress', onKey);
+      if (process.stdin.isTTY) process.stdin.setRawMode(false);
+      process.stdout.write(`\x1b[${choices.length}B`); // move cursor down past menu
+      process.stdout.write('\x1b[?25h'); // show cursor
+      console.log('');
+      resolve(choices[index].value);
+    };
+
+    const onKey = (str, key) => {
       if (!key) return;
       if (key.name === 'up')    { selected = (selected - 1 + choices.length) % choices.length; render(); }
       if (key.name === 'down')  { selected = (selected + 1) % choices.length; render(); }
+      if (/^[1-9]$/.test(str || '')) {
+        const numericIndex = Number(str) - 1;
+        if (numericIndex < choices.length) choose(numericIndex);
+      }
       if (key.name === 'return') {
-        process.stdin.removeListener('keypress', onKey);
-        if (process.stdin.isTTY) process.stdin.setRawMode(false);
-        process.stdout.write(`\x1b[${choices.length}B`); // move cursor down past menu
-        process.stdout.write('\x1b[?25h'); // show cursor
-        console.log('');
-        resolve(choices[selected].value);
+        choose(selected);
       }
       if (key.name === 'c' && key.ctrl) {
         process.stdout.write('\x1b[?25h');
@@ -224,11 +245,11 @@ async function menu(prompt, choices) {
 async function secureInput(prompt) {
   return new Promise(resolve => {
     process.stdout.write(`  ${c(A.bYellow, '🔑')} ${c(A.bWhite, prompt)} ${c(A.gray, '(hidden)')}: `);
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: false });
 
     let token = '';
 
     if (process.stdin.isTTY) {
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: false });
       process.stdin.setRawMode(true);
       readline.emitKeypressEvents(process.stdin);
 
@@ -253,7 +274,12 @@ async function secureInput(prompt) {
       };
       process.stdin.on('keypress', onKey);
     } else {
-      rl.on('line', line => { rl.close(); resolve(line.trim()); });
+      const content = fs.readFileSync(0, 'utf8').trim();
+      if (!content) {
+        console.log(c(A.bRed, '\n  ✘ No token input available. Run the CLI in an interactive terminal or pass a token to start.sh.\n'));
+        process.exit(1);
+      }
+      resolve(content.split(/\r?\n/)[0].trim());
     }
   });
 }
@@ -261,8 +287,8 @@ async function secureInput(prompt) {
 // ═══════════════════════════════════════════════
 //   TOKEN MANAGER
 // ═══════════════════════════════════════════════
-const ENV_PATH  = path.join(process.cwd(), '.env');
-const CONF_PATH = path.join(process.cwd(), '.clanker.json');
+const ENV_PATH  = path.join(APP_ROOT, '.env');
+const CONF_PATH = path.join(APP_ROOT, '.clanker.json');
 
 function loadSavedToken() {
   try {
@@ -354,15 +380,31 @@ async function main() {
     );
 
     const action = await menu('What do you want to do?', [
-      { label: '🚀  Launch Bot with saved token', hint: '(recommended)', value: 'launch' },
-      { label: '🔄  Enter a new token',           hint: '',             value: 'new'    },
-      { label: '🗑️   Clear saved token',          hint: '',             value: 'clear'  },
-      { label: '❌  Exit',                         hint: '',             value: 'exit'   },
+      { label: '🚀  Launch Bot with saved token', hint: '(recommended)', value: 'launch'   },
+      { label: '🗂️   Project Explorer',           hint: 'browse files, export, git...', value: 'explorer' },
+      { label: '🔄  Enter a new token',           hint: '',             value: 'new'      },
+      { label: '🗑️   Clear saved token',          hint: '',             value: 'clear'    },
+      { label: '❌  Exit',                         hint: '',             value: 'exit'     },
     ]);
 
     if (action === 'exit') {
       console.log(c(A.gray, '\n  Goodbye! 👋\n'));
       process.exit(0);
+    }
+
+    if (action === 'explorer') {
+      const explorerPath = path.join(APP_ROOT, 'explorer.js');
+      if (!fs.existsSync(explorerPath)) {
+        console.log(c(A.bRed, '\n  ✘ explorer.js not found. Make sure it is in the project folder.\n'));
+      } else {
+        const explorerProc = spawn(process.execPath, [explorerPath, APP_ROOT], {
+          cwd: APP_ROOT,
+          env: { ...process.env, FORCE_COLOR: '1' },
+          stdio: 'inherit',
+        });
+        await new Promise(resolve => explorerProc.on('exit', resolve));
+      }
+      return main();
     }
 
     if (action === 'clear') {
@@ -455,13 +497,14 @@ async function main() {
   console.log('');
 
   // ── Spawn bot process ──
-  const botPath = path.join(process.cwd(), 'index.js');
+  const botPath = path.join(APP_ROOT, 'index.js');
   if (!fs.existsSync(botPath)) {
     console.log(c(A.bRed, `  ✘ index.js not found at: ${botPath}\n`));
     process.exit(1);
   }
 
   const botProc = spawn(process.execPath, [botPath], {
+    cwd: APP_ROOT,
     env: { ...process.env, TOKEN: token, FORCE_COLOR: '1' },
     stdio: 'inherit',
   });

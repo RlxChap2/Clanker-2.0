@@ -1,4 +1,5 @@
-require('dotenv').config();
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 const { Events, Client, Partials, GatewayIntentBits, ChannelType } = require('discord.js');
 
 // ANSI ENGINE
@@ -24,6 +25,12 @@ const A = {
 };
 const col = (a, t) => `${a}${t}${A.reset}`;
 const strip = (s) => String(s).replace(/\x1b\[[0-9;]*m/g, '');
+const token = process.env.TOKEN;
+
+if (!token) {
+    console.error('Missing TOKEN. Add TOKEN=your_discord_bot_token to .env or launch through cli.js.');
+    process.exit(1);
+}
 
 function termWidth() {
     try {
@@ -427,7 +434,7 @@ client.once(Events.ClientReady, async (c) => {
             'Created': g.createdAt.toLocaleDateString(),
         }));
 
-    renderMultiTable('🏆', 'TOP 5 GUILDS (by members)', topGuilds, A.bYellow);
+    renderMultiTable('📋', 'FIRST 5 GUILDS (by members)', topGuilds, A.bYellow);
 
     // FOOTER
     console.log('');
@@ -438,12 +445,17 @@ client.once(Events.ClientReady, async (c) => {
     console.log(col(A.bCyan, '═'.repeat(w)));
     console.log('');
 
-    // Exit after 5 seconds to prevent hanging if not run in a proper terminal
-    setTimeout(() => {
-        console.log(col(A.gray, 'Exiting...'));
-        c.destroy();
-        process.exit(0);
-    }, 5000);
+    const autoExitMs = Number(process.env.CLANKER_AUTO_EXIT_AFTER_READY_MS || 0);
+    if (Number.isFinite(autoExitMs) && autoExitMs > 0) {
+        setTimeout(() => {
+            console.log(col(A.gray, 'Exiting...'));
+            c.destroy();
+            process.exit(0);
+        }, autoExitMs);
+    }
 });
 
-client.login(process.env.TOKEN);
+client.login(token).catch((err) => {
+    console.error(`Discord login failed: ${err.message}`);
+    process.exit(1);
+});

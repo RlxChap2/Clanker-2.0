@@ -1,6 +1,7 @@
 @echo off
 chcp 65001 >nul
 title Clanker 2.0 Launcher
+cd /d "%~dp0"
 
 :: ─────────────────────────────────────────
 ::  Check if Node.js is installed

@@ -1,6 +1,37 @@
 {
+  "name": "clanker-2.0",
+  "version": "2.0.0",
+  "description": "Clanker 2.0 Discord bot with a professional CLI launcher and project explorer.",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node cli.js",
+    "bot": "node index.js",
+    "explorer": "node explorer.js .",
+    "dev": "node --watch index.js",
+    "test": "node --check cli.js && node --check index.js && node --check explorer.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RlxChap2/Clanker-2.0.git"
+  },
+  "keywords": [
+    "discord",
+    "discord-bot",
+    "cli",
+    "project-explorer"
+  ],
+  "author": "Clanker 2.0",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/RlxChap2/Clanker-2.0/issues"
+  },
+  "homepage": "https://github.com/RlxChap2/Clanker-2.0#readme",
   "dependencies": {
     "discord.js": "^14.26.4",
     "dotenv": "^17.4.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
