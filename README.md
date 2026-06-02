@@ -38,9 +38,9 @@ Clanker 2.0 is a Discord bot launcher with a terminal UI, token setup flow, deta
 
 ## Bot Diagnostics
 
-When the bot reaches Discord's ready state, it prints an ASCII-safe diagnostics report. The report includes application metadata, owner/team details, bot user details, cached guild/channel statistics, global command fetch results, gateway/shard status, runtime memory/CPU information, and remote recovery configuration.
+When the bot reaches Discord's ready state, it prints the original styled diagnostics report with the large Clanker banner, bordered tables, stat cards, and curated section icons. The report includes application metadata, owner/team details, bot user details, cached guild/channel statistics, global command fetch results, gateway/shard status, runtime memory/CPU information, and remote recovery configuration.
 
-The CLI, explorer, and shell launcher avoid emoji and box-drawing characters so the output stays readable in Windows Terminal, PowerShell, Git Bash, SSH sessions, and hosting consoles.
+The extra diagnostics use the same visual style as the original report instead of switching to a flat ASCII layout.
 
 ## Script Launchers
 

@@ -580,31 +580,14 @@ function divider(label = '', accent = A.gray) {
     );
 }
 
-// ASCII presentation layer. These declarations intentionally override the older
-// box-drawing renderers above so terminal output stays readable everywhere.
-function termWidth() {
-    try {
-        return Math.min(Math.max(process.stdout.columns || 100, 88), 140);
-    } catch {
-        return 100;
-    }
-}
-
-function asciiText(value) {
+// Helper functions for the extended diagnostics below.
+function cleanText(value) {
     if (value === null || value === undefined || value === '') return 'None';
     const text = String(value)
         .replace(/\x1b\[[0-9;]*m/g, '')
-        .replace(/[^\x20-\x7E]/g, '')
         .replace(/\s+/g, ' ')
         .trim();
     return text || 'None';
-}
-
-function clip(value, width) {
-    const text = asciiText(value);
-    if (text.length <= width) return text.padEnd(width);
-    if (width <= 1) return text.slice(0, width);
-    return `${text.slice(0, width - 1)}~`;
 }
 
 function boolText(value) {
@@ -615,19 +598,11 @@ function boolText(value) {
 function listText(value, fallback = 'None') {
     if (!value) return fallback;
     const items = Array.isArray(value) ? value : [...value];
-    return items.length ? items.map(asciiText).join(', ') : fallback;
+    return items.length ? items.map(cleanText).join(', ') : fallback;
 }
 
 function bitfieldText(value) {
     return value?.toArray?.().join(', ') || 'None';
-}
-
-function dateText(value) {
-    return value ? new Date(value).toLocaleString() : 'None';
-}
-
-function ageDays(value) {
-    return value ? Math.floor((Date.now() - new Date(value).getTime()) / 86400000) : 'N/A';
 }
 
 function mb(bytes) {
@@ -653,7 +628,7 @@ function collectionSum(collection, mapper) {
 function countBy(collection, mapper) {
     const counts = new Map();
     collection.forEach((item) => {
-        const key = asciiText(mapper(item));
+        const key = cleanText(mapper(item));
         counts.set(key, (counts.get(key) || 0) + 1);
     });
     return counts;
@@ -668,7 +643,7 @@ function topCounts(collection, mapper, limit = 8) {
 }
 
 function section(label = '') {
-    return [`-- ${label} --`, ''.padEnd(24, '-')];
+    return [`── ${label} ──`, '──────────────────'];
 }
 
 function optionalUrl(value) {
@@ -680,80 +655,6 @@ function optionalUrl(value) {
         }
     }
     return value || 'None';
-}
-
-function renderHeader(title, subtitle) {
-    const width = termWidth();
-    const border = '='.repeat(width);
-    const safeTitle = asciiText(title);
-    const safeSubtitle = asciiText(subtitle);
-    console.log(`\n${col(A.bCyan, border)}`);
-    console.log(col(A.bold + A.bWhite, safeTitle.padStart(Math.floor((width + safeTitle.length) / 2))));
-    if (safeSubtitle !== 'None') {
-        console.log(col(A.gray, safeSubtitle.padStart(Math.floor((width + safeSubtitle.length) / 2))));
-    }
-    console.log(col(A.bCyan, border));
-}
-
-function renderCards(cards) {
-    const width = termWidth();
-    const colWidth = Math.max(12, Math.floor((width - cards.length + 1) / cards.length));
-    const line = cards.map(() => `+${'-'.repeat(colWidth - 2)}+`).join('');
-    console.log(line);
-    console.log(cards.map((card) => `|${clip(card.value, colWidth - 2)}|`).join(''));
-    console.log(cards.map((card) => `|${clip(card.label, colWidth - 2)}|`).join(''));
-    console.log(line);
-}
-
-function renderTable(iconOrTitle, titleOrData, dataOrAccent, accentMaybe) {
-    const title = typeof titleOrData === 'string' ? titleOrData : iconOrTitle;
-    const data = typeof titleOrData === 'string' ? dataOrAccent : titleOrData;
-    const accent = typeof titleOrData === 'string' ? accentMaybe || A.bCyan : dataOrAccent || A.bCyan;
-    const entries = Array.isArray(data) ? data : Object.entries(data || {});
-    const width = termWidth();
-    const keyWidth = Math.min(34, Math.max(24, Math.floor(width * 0.32)));
-    const valueWidth = width - keyWidth - 7;
-    const border = `+${'-'.repeat(keyWidth + 2)}+${'-'.repeat(valueWidth + 2)}+`;
-
-    console.log(`\n${col(accent, border)}`);
-    console.log(col(accent, '| ') + col(A.bold + A.bWhite, clip(title, width - 4)) + col(accent, ' |'));
-    console.log(col(accent, border));
-
-    for (const [key, value] of entries) {
-        console.log(
-            col(accent, '| ') +
-                col(A.bCyan, clip(key, keyWidth)) +
-                col(accent, ' | ') +
-                col(A.bWhite, clip(value, valueWidth)) +
-                col(accent, ' |'),
-        );
-    }
-
-    console.log(col(accent, border));
-}
-
-function renderMultiTable(iconOrTitle, titleOrRows, rowsOrAccent, accentMaybe) {
-    const title = Array.isArray(titleOrRows) ? iconOrTitle : titleOrRows;
-    const rows = Array.isArray(titleOrRows) ? titleOrRows : rowsOrAccent;
-    const accent = Array.isArray(titleOrRows) ? rowsOrAccent || A.bMagenta : accentMaybe || A.bMagenta;
-    if (!rows?.length) return;
-
-    const width = termWidth();
-    const keys = Object.keys(rows[0]);
-    const colWidth = Math.max(10, Math.floor((width - keys.length - 1) / keys.length));
-    const border = `+${keys.map(() => '-'.repeat(colWidth)).join('+')}+`;
-
-    console.log(`\n${col(accent, border)}`);
-    console.log(col(A.bold + A.bWhite, asciiText(title)));
-    console.log(col(accent, border));
-    console.log(`|${keys.map((key) => clip(key, colWidth)).join('|')}|`);
-    console.log(col(accent, border));
-
-    for (const row of rows) {
-        console.log(`|${keys.map((key) => clip(row[key], colWidth)).join('|')}|`);
-    }
-
-    console.log(col(accent, border));
 }
 
 async function tryFetch(label, fn, fallback) {
@@ -775,9 +676,6 @@ const client = new Client({
 client.once(Events.ClientReady, async (c) => {
     const w = termWidth();
 
-    renderHeader('CLANKER 2.0', `Diagnostics for ${c.user.tag ?? c.user.username}`);
-
-    if (false) {
     // BANNER
     console.log('\n');
     console.log(col(A.bCyan, '═'.repeat(w)));
@@ -797,8 +695,6 @@ client.once(Events.ClientReady, async (c) => {
     const subPad = Math.max(0, Math.floor((w - sub.length) / 2));
     console.log(' '.repeat(subPad) + col(A.bold + A.bMagenta, sub));
     console.log(col(A.bCyan, '═'.repeat(w)));
-
-    }
 
     // FETCH DATA
     const app = await c.application.fetch();
@@ -1046,6 +942,7 @@ client.once(Events.ClientReady, async (c) => {
         .map(([type, count]) => [type, count]);
 
     renderTable(
+        '🧩',
         'APPLICATION EXTENDED',
         [
             section('Install'),
@@ -1069,6 +966,7 @@ client.once(Events.ClientReady, async (c) => {
     );
 
     renderTable(
+        '🤖',
         'BOT USER EXTENDED',
         [
             ['Global Name', botUser.globalName ?? 'None'],
@@ -1087,6 +985,7 @@ client.once(Events.ClientReady, async (c) => {
     );
 
     renderTable(
+        '🏰',
         'GUILD SUMMARY',
         [
             ['Total Member Count', totalMembers],
@@ -1105,9 +1004,10 @@ client.once(Events.ClientReady, async (c) => {
         A.bGreen,
     );
 
-    renderTable('CHANNEL TYPES', channelBreakdown.length ? channelBreakdown : [['None', 0]], A.bGreen);
+    renderTable('📡', 'CHANNEL TYPES', channelBreakdown.length ? channelBreakdown : [['None', 0]], A.bGreen);
 
     renderTable(
+        '⚙️',
         'RUNTIME EXTENDED',
         [
             ['Project Root', __dirname],
@@ -1134,6 +1034,7 @@ client.once(Events.ClientReady, async (c) => {
     );
 
     renderTable(
+        '🔐',
         'REMOTE RECOVERY',
         [
             ['Enabled', boolText(remoteRecoveryEnabled)],
@@ -1166,13 +1067,6 @@ client.once(Events.ClientReady, async (c) => {
 
     renderMultiTable('📋', 'FIRST 5 GUILDS (by members)', topGuilds, A.bYellow);
 
-    console.log('');
-    console.log(col(A.bCyan, '='.repeat(termWidth())));
-    console.log(col(A.bold + A.bGreen, `ONLINE: ${asciiText(c.user.tag ?? c.user.username)} | ${new Date().toLocaleString()}`));
-    console.log(col(A.bCyan, '='.repeat(termWidth())));
-    console.log('');
-
-    if (false) {
     // FOOTER
     console.log('');
     console.log(col(A.bCyan, '═'.repeat(w)));
@@ -1181,8 +1075,6 @@ client.once(Events.ClientReady, async (c) => {
     console.log(' '.repeat(donePad) + col(A.bold + A.bGreen, done));
     console.log(col(A.bCyan, '═'.repeat(w)));
     console.log('');
-
-    }
 
     if (remoteRecoveryEnabled) {
         if (recoveryOwnerIds.size === 0) {

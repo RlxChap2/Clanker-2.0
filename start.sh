@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# --------------------------------------------
-#   Clanker 2.0 - Shell Launcher
+# ════════════════════════════════════════════
+#   Clanker 2.0 — Shell Launcher
 #   Usage: ./start.sh [TOKEN]
-# --------------------------------------------
+# ════════════════════════════════════════════
 
 set -e
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# ── Colors ──────────────────────────────────
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 CYAN='\033[0;36m'
@@ -22,26 +23,29 @@ warn()    { echo -e "${YELLOW}  [WARN]${RESET}  $1"; }
 error()   { echo -e "${RED}  [ERROR]${RESET} $1"; }
 
 echo ""
-echo -e "${CYAN}${BOLD}  ======================================${RESET}"
-echo -e "${CYAN}${BOLD}    Clanker 2.0 - Launcher              ${RESET}"
-echo -e "${CYAN}${BOLD}  ======================================${RESET}"
+echo -e "${CYAN}${BOLD}  ══════════════════════════════════════${RESET}"
+echo -e "${CYAN}${BOLD}    Clanker 2.0 — Launcher             ${RESET}"
+echo -e "${CYAN}${BOLD}  ══════════════════════════════════════${RESET}"
 echo ""
 
-if ! command -v node > /dev/null 2>&1; then
+# ── Check Node.js ────────────────────────────
+if ! command -v node &> /dev/null; then
   error "Node.js is not installed."
   echo "  Install it from: https://nodejs.org"
   echo ""
   exit 1
 fi
 
-NODE_VER="$(node -v)"
+NODE_VER=$(node -v)
 success "Node.js found: $NODE_VER"
 
-if ! command -v npm > /dev/null 2>&1; then
+# ── Check npm ────────────────────────────────
+if ! command -v npm &> /dev/null; then
   error "npm is not found."
   exit 1
 fi
 
+# ── Install deps if needed ───────────────────
 if [ ! -d "node_modules/discord.js" ]; then
   info "Installing dependencies..."
   echo ""
@@ -51,8 +55,11 @@ if [ ! -d "node_modules/discord.js" ]; then
   echo ""
 fi
 
-if [ -n "${1:-}" ]; then
-  info "Token passed via argument - saving to .env"
+# ── Token via argument ───────────────────────
+#    Usage: ./start.sh YOUR_TOKEN
+if [ -n "$1" ]; then
+  info "Token passed via argument — saving to .env"
+  # Write or replace TOKEN line in .env
   if [ -f ".env" ]; then
     if grep -q "^TOKEN=" .env; then
       sed -i.bak "s/^TOKEN=.*/TOKEN=$1/" .env && rm -f .env.bak
@@ -66,12 +73,14 @@ if [ -n "${1:-}" ]; then
   echo ""
 fi
 
+# ── Set terminal title ───────────────────────
 if [ -t 0 ] && [ -t 1 ]; then
   echo -ne "\033]0;Clanker 2.0\007"
 else
   warn "Non-interactive shell detected. The CLI will auto-select the default action."
 fi
 
+# ── Launch CLI ───────────────────────────────
 node cli.js
 
 EXIT_CODE=$?

@@ -44,21 +44,9 @@ const A = {
   bgCyan:    '\x1b[46m',
 };
 
-function asciiText(value) {
-  return String(value ?? '')
-    .replace(/\x1b\[[0-9;]*m/g, '')
-    .replace(/[^\x09\x0a\x0d\x20-\x7e]/g, '')
-    .replace(/[ \t]+/g, ' ');
-}
-
-function asciiChar(value, fallback = '-') {
-  const text = asciiText(value).trim();
-  return text.length === 1 ? text : fallback;
-}
-
-const c = (color, text) => `${color}${asciiText(text)}${A.reset}`;
+const c = (color, text) => `${color}${text}${A.reset}`;
 const clearScreen = () => process.stdout.write('\x1bc');
-const stripAnsi = text => asciiText(String(text).replace(/\x1b\[[0-9;]*m/g, ''));
+const stripAnsi = text => String(text).replace(/\x1b\[[0-9;]*m/g, '');
 const APP_ROOT = __dirname;
 
 // ═══════════════════════════════════════════════
@@ -370,66 +358,9 @@ async function fakeLoading(msg, steps = 20) {
 // ═══════════════════════════════════════════════
 //   MAIN FLOW
 // ═══════════════════════════════════════════════
-// ASCII-safe presentation overrides for terminals that do not render Unicode well.
-function line(char = '-', color = A.gray, width = termWidth()) {
-  return c(color, asciiChar(char, '-').repeat(width));
-}
-
-function printBannerAscii() {
-  const w = termWidth();
-  console.log('');
-  console.log(line('=', A.bCyan, w));
-  console.log(centerText(c(A.bold + A.bCyan, 'CLANKER 2.0'), w));
-  console.log(centerText(c(A.gray, 'Discord Bot Launcher | Production CLI'), w));
-  console.log(line('=', A.bCyan, w));
-  console.log('');
-}
-
-function box(title, lines, accentColor = A.bCyan, width = 60) {
-  const innerW = width - 2;
-  const cleanTitle = stripAnsi(title).trim();
-  const topBar = '+' + '-'.repeat(innerW) + '+';
-  const midBar = '+' + '-'.repeat(innerW) + '+';
-  const botBar = '+' + '-'.repeat(innerW) + '+';
-  const titlePad = Math.max(0, Math.floor((innerW - cleanTitle.length) / 2));
-  const titleRow = '|' + ' '.repeat(titlePad) + cleanTitle + ' '.repeat(Math.max(0, innerW - titlePad - cleanTitle.length)) + '|';
-
-  console.log(c(accentColor, topBar));
-  console.log(c(accentColor, titleRow));
-  console.log(c(accentColor, midBar));
-  lines.forEach((ln) => {
-    const text = stripAnsi(ln);
-    const padding = Math.max(0, innerW - 2 - text.length);
-    console.log(c(accentColor, '|') + ' ' + text + ' '.repeat(padding) + ' ' + c(accentColor, '|'));
-  });
-  console.log(c(accentColor, botBar));
-}
-
-function progressBar(current, total, width = 30) {
-  const pct = total > 0 ? current / total : 1;
-  const filled = Math.round(pct * width);
-  const bar = c(A.bCyan, '#'.repeat(filled)) + c(A.gray, '-'.repeat(Math.max(0, width - filled)));
-  return `[${bar}] ${c(A.bWhite, Math.round(pct * 100) + '%')}`;
-}
-
-async function fakeLoading(msg, steps = 20) {
-  return new Promise((resolve) => {
-    let i = 0;
-    const iv = setInterval(() => {
-      process.stdout.write(`\r  ${c(A.bCyan, '...')} ${c(A.gray, msg)} ${progressBar(i, steps)}   `);
-      i++;
-      if (i > steps) {
-        clearInterval(iv);
-        process.stdout.write(`\r  ${c(A.bGreen, 'OK ')} ${c(A.bWhite, msg)} ${progressBar(steps, steps)}\n`);
-        resolve();
-      }
-    }, 40);
-  });
-}
-
 async function main() {
   clearScreen();
-  printBannerAscii();
+  printBanner();
 
   // ── Check existing token ──
   let token = loadSavedToken();
